@@ -1,289 +1,183 @@
 ---
 name: work-summary
-description: Zero-miss daily work logging for any project. Every task the user gives (feature, bug fix, error resolution, change request) gets its own `###` section in WORK_SUMMARY/WORK_SUMMARY-DD-MM-YYYY.md, opened the moment the task arrives, filled during the work, and closed with a two-part Technical Details + plain-English Human Summary before the agent says "done". Use PROACTIVELY on every code-touching task without being asked, at task completion, and at session wrap-up to audit that nothing was missed. Also triggers on explicit requests such as "/work-summary", "set up work summaries here", "initialize work logging", "log this task".
+description: Zero-miss daily work log that doubles as a low-token memory for coding agents. Every task gets its own section in WORK_SUMMARY/WORK_SUMMARY-DD-MM-YYYY.md (opened on receive, closed with a plain-English Human Summary before "done"), plus a one-line row in WORK_SUMMARY/INDEX.md and durable codebase facts in WORK_SUMMARY/CONTEXT.md, so the next session resumes from a few hundred tokens instead of re-reading files. Use PROACTIVELY at session start (resume), on every code-touching task, at completion, and at wrap-up. Also triggers on "/work-summary", "set up work summaries here", "what did we do last time", "log this task".
 ---
 
-# work-summary - zero-miss daily work logging
+# work-summary - daily work log + low-token agent memory
 
-This skill keeps a daily, per-task record of everything the agent does for the
-user. Each record has two parts:
+The log serves two readers:
 
-1. **Technical Details** for the next engineer or agent: request, files, root
-   cause, decisions, commit IDs, verification.
-2. **Human Summary** for non-technical readers (managers, HR, accountants,
-   timesheets): one plain-English paragraph that a downstream script can extract
-   verbatim.
+- **People** (managers, HR, timesheets) read the Human Summary of each task.
+- **The next agent** reads the index, the context file and the compact
+  Technical Details, so it can pick up the last work and find the right code
+  without re-exploring the repository.
 
-The method exists because, left alone, long agent sessions bundle ten tasks into
-three sections at the end of the day, forget tasks that were interrupted, and
-write summaries full of file paths that nobody outside engineering can read. The
-rules below close each of those gaps.
+Writing a few precise lines now saves thousands of tokens of re-discovery later.
+Every rule below serves one of those two readers.
 
----
+## 1. Files
 
-## 1. Where the files live
+Folder `<WS>`, resolved in order, first match wins:
+1. a path pinned in the project's `CLAUDE.md` / `AGENTS.md`;
+2. `<git toplevel>/WORK_SUMMARY/`, or `<cwd>/WORK_SUMMARY/` outside git.
+If two folders are plausible, use the one `CLAUDE.md` names, or ask once.
 
-Resolve the summary folder in this order; the first match wins:
+| File | Purpose | Size rule |
+|---|---|---|
+| `WORK_SUMMARY-DD-MM-YYYY.md` | one file per day, one `###` section per task | sections stay compact (section 4) |
+| `INDEX.md` | one line per task, newest first | one line each, never paragraphs |
+| `CONTEXT.md` | durable project facts for agents | stay under about 120 lines; replace, do not append |
 
-1. **A path pinned in the project's `CLAUDE.md` / `AGENTS.md`.** If the project
-   names a canonical work-summary folder, use exactly that folder and nothing
-   else.
-2. **`<ROOT>/WORK_SUMMARY/`**, where `<ROOT>` is:
-   - `git rev-parse --show-toplevel` run from the primary working directory, or
-   - the primary working directory, if it is not a git repository.
-3. If several folders are plausible (for example one at a workspace root and a
-   stale copy inside a sub-repository), prefer the one `CLAUDE.md` names; if
-   still unclear, ask the user once.
+- Never commit `<WS>`. Inside git, list it in `.git/info/exclude`.
+- Parallel sessions: read before writing, append or insert, never overwrite
+  another agent's lines.
+- Today's date comes from the harness date line (cross-check the clock); the
+  section time comes from `date "+%H:%M"`.
+- First use in a project: follow `reference/bootstrap.md` (creates the folder,
+  the templates and a short `CLAUDE.md` block). Read it only then.
 
-File name: `WORK_SUMMARY-DD-MM-YYYY.md`, one file per day.
+## 2. Resume cheaply (session start, or before touching an area)
 
-### Preservation rules (why the location matters)
+Do this before exploring the codebase. Stop as soon as you have enough.
 
-- **Never commit work summaries.** They are local records, not source code.
-  When the folder is inside a git repository, add `WORK_SUMMARY/` to
-  `.git/info/exclude` (a local-only ignore list that is itself never committed)
-  so it cannot be staged by accident. Do not edit the shared `.gitignore` unless
-  the user asks.
-- **Survive branch switches.** An untracked, excluded folder is untouched by
-  `git checkout`, `switch`, `reset` and `stash`. Warn the user that
-  `git clean -x` would still delete it. For maximum safety, recommend keeping
-  the folder outside the repository (for example in the parent workspace folder)
-  and pinning that path in `CLAUDE.md`.
-- **One canonical folder.** Never write a day's sections into two different
-  folders. A split day means a timesheet extractor sees only half the work.
-- **Parallel sessions append, never overwrite.** Another agent may already have
-  written today's file. Always read it first, append your sections in
-  chronological order, and extend (do not rewrite) the End of Day block.
+1. Read `CONTEXT.md` in full (it is small by design).
+2. Read the newest rows only: `head -n 25 <WS>/INDEX.md`.
+3. Find past work on what you are about to touch:
+   `grep -n -i "<file name|area|keyword>" <WS>/INDEX.md`
+4. To open one past task, read only its section, never the whole day file:
+   `grep -n "^### " <WS>/WORK_SUMMARY-DD-MM-YYYY.md`, then Read with
+   `offset`/`limit` for that section.
+5. Jump straight to the code named in `Touched:`. Before trusting line numbers,
+   check whether the file changed since the recorded commit
+   (`git log --oneline <commit>..HEAD -- <path>`). If it did, locate the
+   recorded symbol by name instead.
+6. Rows with status `Open` or `Blocked` are unfinished work. Mention them to
+   the user if they are related to the new request.
 
-### Today's date
+Do not read old day files end to end, and do not re-map code that
+`CONTEXT.md` already maps unless it looks stale.
 
-Take today's date from the harness context (the current-date line), not only
-the machine clock; cross-check them if they disagree. Use `date "+%H:%M"` for
-the section time.
+## 3. Task lifecycle (every task, no exceptions)
 
----
+1. **On receive, before any work:** append a section to today's file with
+   `**Status:** In Progress`, the `**Request:**` line and an empty Human
+   Summary block. Insert an `Open` row at the top of `INDEX.md`. Save both.
+2. **During work:** fill the agent fields (section 4) as facts become known.
+3. **On completion, before saying "done":** set `**Status:** Completed`, fill
+   the Human Summary (section 5), and flip the index row to `Done` (adding
+   files and commit). If you learned a durable fact, update `CONTEXT.md`.
+4. **End of day:** update the `## End of Day Summary` block (Completed, In
+   Progress, Blocked with reason, Tomorrow).
 
-## 2. First use in a project (bootstrap, idempotent)
+Edge cases (fixed decisions):
+- Every message that asks for a change gets its own section and index row,
+  even a one-line fix. Three tasks in one message means three sections.
+- A new task while another is in progress gets a new section at once. The old
+  one stays In Progress.
+- Iterations on the same task ("bigger", "now thinner") stay in one section;
+  add a line under `**Change:**`. The Human Summary describes the final state.
+- Pure conversation that writes nothing to disk gets no section. When in
+  doubt, write one.
+- Testing of a new feature goes in its own section:
+  `### HH:MM - [AREA] Testing: <feature>` with the cases, a bug log, the cycle
+  count and the final result.
 
-1. Create the summary folder if it is missing, and add it to
-   `.git/info/exclude` when inside a git repository.
-2. Create today's file from the **daily-file template** (section 7) if it does
-   not exist. If it exists, leave it as is.
-3. Add the **CLAUDE.md block** (section 8) to the project's `CLAUDE.md` (or
-   `AGENTS.md` if that is the repository's convention) only if a
-   `## Work Summary Logging` heading is not already there. Append; never rewrite
-   the user's existing content. If no such file exists, create one containing
-   just the block.
-4. Tell the user the folder path, today's file, and whether `CLAUDE.md` was
-   updated.
-
-At the start of every later session, repeat step 2 for the new date.
-
----
-
-## 3. The task lifecycle (mandatory for every task)
-
-### Step 1 - On task receive, BEFORE any other work
-
-The moment the user gives a task, bug fix, error resolution or change request:
-
-1. Open today's file (create it from the template if missing).
-2. Append a new section:
-
-   ```markdown
-   ### HH:MM - <Task title>
-
-   <!-- Part 1: Technical Details -->
-   **Request:** <the user's ask, restated as a clear engineering statement>
-
-   **Status:** In Progress
-
-   <!-- Part 2: Human Summary (MANDATORY) -->
-   > **Human Summary:**
-   > Task:
-   > Task summary:
-   > Date: <DD Mon YYYY>
-   > Duration:
-
-   ---
-   ```
-
-3. Save the file.
-4. Only then start the implementation.
-
-Opening first is what makes the log robust: if the session is interrupted, the
-file still shows that the task was received and is unfinished.
-
-### Step 2 - During work
-
-Fill Part 1 progressively: files modified (`- path: what changed`), root cause
-for bugs, function names, commit IDs, verification commands and results,
-decisions and open questions. Markdown is free here. Leave the Human Summary
-empty.
-
-### Step 3 - On completion, BEFORE telling the user "done"
-
-1. Change `**Status:**` to `Completed`.
-2. Fill the Human Summary (rules in section 5).
-3. Save. Only then report completion.
-
-If the file is not updated, the task is not done.
-
-### Step 4 - End of day
-
-Update the `## End of Day Summary` block: Completed, In Progress, Blocked
-(with the reason), Tomorrow (carry-over notes).
-
-### Save points
-
-The file is written at two checkpoints per task: after Step 1 (section present,
-In Progress, empty Human Summary) and after Step 3 (Completed, Human Summary
-filled). A reader checking mid-session sees an honest In Progress, never a
-missing task.
-
----
-
-## 4. Edge-case rules (fixed decisions, do not reinterpret)
-
-- **Granularity: every message that asks for a change gets its own section**,
-  even a one-line copy fix. A message with three tasks gets three sections.
-  Section spam is a smaller problem than missing work.
-- **Mid-task pivots:** if the user starts task B while task A is In Progress,
-  open a new section for B at once. A keeps its In Progress status; return to it
-  after B. Never bury B inside A.
-- **Iterations on the same task** ("bigger", "now thinner", "move it to the
-  corner") stay in ONE section; append each refinement to its Technical
-  Details. The Human Summary describes the final state, not the journey.
-- **Pure conversation gets no section.** If answering writes nothing to disk in
-  the project (a question, a diagnosis, an explanation), do not open a section.
-  When in doubt, write the section.
-- **Testing sections (recommended).** When a newly built feature is tested in
-  the running app, record the testing as its own section titled
-  `### HH:MM - [AREA] Testing: <feature>` with the test-case list and results,
-  a bug log (ID, steps, expected, actual, severity, status, fix), the number of
-  test cycles and the final result. Its Human Summary says what was tested, how
-  many issues were found and fixed, and that the feature works.
-
----
-
-## 5. Human Summary rules (strict)
-
-The Human Summary is pasted verbatim into timesheets and reports read by people
-who do not read code. Exact shape, at the end of each section:
+## 4. Section format (agent fields are terse facts)
 
 ```markdown
+### HH:MM - [Area] <task title>
+
+**Status:** In Progress | Completed | Blocked (<reason>)
+**Request:** <the ask, as one clear engineering statement>
+**Touched:** `path/file.py:120-168` (`function_name`), `path/view.js` (`onSave`)
+**Cause:** <root cause in one or two sentences; bugs only>
+**Change:** <what changed and why, one line per change>
+**Decisions:** <choices made, rejected options, user confirmations>
+**Verify:** `<command>` -> <result>
+**Commit:** <short sha(s)> on <branch>, or "uncommitted"
+**Next:** <open threads, follow-ups, or ->
+
 > **Human Summary:**
-> Task: <plain-English, business-outcome title, 8-15 words>
-> Task summary: <one flowing paragraph, 80-150 words>
-> Date: <DD Mon YYYY, for example 15 May 2026>
+> Task: ...
+> Task summary: ...
+> Date: DD Mon YYYY
+> Duration:
+
+---
+```
+
+Rules for the agent fields:
+- Write facts, not a story. No "first I looked at...". Leave out fields that
+  do not apply.
+- `Touched` always names the path and the symbol, with line ranges when
+  known. The symbol keeps the pointer valid after the line numbers drift.
+- Never paste code, diffs or long logs. The commit holds the diff. Quote at
+  most the one log line that proves a point.
+- Aim for under 20 lines before the Human Summary. Add more only when the
+  user asks for detail.
+- Keep the `[Area]` tag consistent from day to day (same spelling), because
+  agents grep for it.
+
+### INDEX.md row
+
+Newest first, directly under the header. One line per task:
+
+```
+2026-05-15 10:12 | Done | Invoicing | Invoice PDF totals use invoice currency | templates/invoice_pdf.html, tests/test_invoice_pdf.py | 3f9c2ab
+```
+
+Columns: date, time, `Open`/`Done`/`Blocked`, area, short title, main files
+(paths only, at most four), commit or `-`. Keep each row under about 200
+characters. The day file and time locate the full section.
+
+### CONTEXT.md
+
+This is a project map for agents, not a diary. Allowed content:
+- how to run, test, build and lint (exact commands);
+- where things live (`area -> path`, with entry points);
+- conventions, gotchas and non-obvious constraints, each costly to rediscover.
+
+Write a fact only when it is stable and you had to spend real effort to find
+it. Edit the existing line rather than adding a near-duplicate. Delete facts
+that turn out to be wrong. Do not repeat what `CLAUDE.md` already says. Keep
+an `Updated: YYYY-MM-DD` line at the top.
+
+## 5. Human Summary (for people; the format is a contract)
+
+```
+> **Human Summary:**
+> Task: <8-15 word, outcome-led title>
+> Task summary: <one plain-English paragraph, 80-150 words>
+> Date: <DD Mon YYYY, the file's date>
 > Duration:
 ```
 
-- **Plain English only.** No other languages or transliterations, no smart
-  quotes.
-- **No code-shaped tokens:** no file paths, function, class or variable names,
-  database table names, commit hashes, branch names, version numbers, build
-  hashes, error or HTTP status codes, build or shell commands, URLs.
-- **No engineering acronyms** (API, SDK, OCR, LLM, JWT, HTTP, SSO, BE, FE and
-  similar). Business acronyms the readers use daily (GST, VAT, UAT, PR) are
-  fine.
-- **One flowing paragraph:** no bullets, tables, headings, inline code or bold
-  inside the text.
-- **Outcome-led, not implementation-led.**
-  - Engineer phrasing: "Added a non-null owner column with a migration on three
-    client tables."
-  - Human Summary phrasing: "Added a field on every client record to show which
-    staff member owns it."
-- **Precise verbs:** implemented, built, added, fixed, patched, debugged,
-  refactored, validated, reviewed, deployed, reproduced, root-caused, migrated.
-  Avoid filler: "successfully", "seamlessly", "leveraged", "robust solution",
-  "best practices", "state-of-the-art".
-- **Unique per task.** Two sections must not share a title or a near-identical
-  summary; if they truly describe the same work, merge them.
-- **Lengths:** title 8-15 words (a sentence, not a bare noun phrase or a
-  question); summary 80-150 words, aiming for the middle.
-- **Date** is required and matches the file's date. **Duration** stays blank
-  unless the user gives a figure to forward.
+- Plain English, one flowing paragraph, outcome-led (what the user or the
+  business gets, not how the code is built).
+- No code-shaped tokens: paths, symbols, table names, hashes, branches,
+  versions, error or status codes, commands, URLs.
+- No engineering acronyms (API, SDK, LLM, JWT, HTTP, SSO...). Business
+  acronyms the readers use (GST, VAT, UAT, PR) are fine.
+- Precise verbs (built, fixed, added, validated, migrated). No filler
+  ("successfully", "seamlessly", "robust").
+- Each task gets a unique title and summary. `Duration` stays blank unless the
+  user gives a figure.
+- Never rename or reorder the five marker lines; extractors grep for them.
 
-Downstream tools find the block by the literal line `> **Human Summary:**` and
-the four markers `Task:`, `Task summary:`, `Date:`, `Duration:`. Never rename
-or reorder them.
+## 6. Session-end audit
 
----
+Before wrap-up ("done", "thanks", a push request), check:
+- every task has a section and an index row;
+- every section is Completed, or In Progress / Blocked with a reason, and its
+  index status matches;
+- every Completed section has a filled Human Summary with no placeholders;
+- `CONTEXT.md` reflects anything durable learned today and is still under the
+  size cap.
 
-## 6. Session-end self-audit
-
-Before the session wraps up ("done", "thanks", "that's all", a push request):
-
-- Every task message in the session has a `###` section.
-- Every section is Completed, or In Progress / Blocked with a stated reason.
-- Every Completed section has a filled Human Summary with no placeholder text.
-
-Backfill anything missing from the conversation and the git history
-(`git status --short`, `git diff`, `git log`), marking it
-`Backfill note (DD-MM-YYYY): ...`. A backfilled section still gets a full
-Human Summary.
-
----
-
-## 7. Daily-file template
-
-```markdown
-# Work Summary - DD-MM-YYYY
-
-## Session Info
-- **Date:** <full date, e.g. Friday, 15 May 2026>
-- **Carried Over From:** <date of the latest earlier file, or - if none>
-- **Agents / areas active today:** <list>
-
-## Today's Work
-
-<!-- One ### section per task: opened on receive, closed when done. -->
-
----
-
-## End of Day Summary
-- **Completed:**
-- **In Progress:**
-- **Blocked:**
-- **Tomorrow:**
-```
-
----
-
-## 8. CLAUDE.md block (append once, during bootstrap)
-
-```markdown
-## Work Summary Logging
-
-Work is logged in `WORK_SUMMARY/WORK_SUMMARY-DD-MM-YYYY.md` (one file per day,
-never committed). Every task the user gives gets its OWN `###` section: opened
-the moment the task is received (Status: In Progress), filled during the work,
-and closed (Status: Completed) with a filled Human Summary BEFORE telling the
-user it is done.
-
-Each section has two parts:
-1. Technical Details: request, files, root cause, decisions, commit IDs,
-   verification. Free-form markdown.
-2. Human Summary, in exactly this shape:
-   > **Human Summary:**
-   > Task: <8-15 word outcome-led title>
-   > Task summary: <one 80-150 word plain-English paragraph; no file paths,
-   > function names, commit hashes, engineering acronyms or error codes>
-   > Date: <DD Mon YYYY>
-   > Duration:
-
-One section per task; refinements of an open task append to its section;
-questions that change nothing on disk get no section. Parallel sessions append
-to today's file and never overwrite it. At session end, audit that every task
-has a Completed section with a filled Human Summary.
-
-The `work-summary` skill enforces this lifecycle.
-```
-
----
+Backfill anything missing from the conversation and `git log` / `git status`,
+marked `Backfill note (DD-MM-YYYY)`.
 
 ## Related skill
 
-`end-of-day-summary` reads the day's file and prints a shareable "Task N:"
-summary. It only reads; recording work is this skill's job.
+`end-of-day-summary` turns a day file into a shareable "Task N:" summary. It
+only reads.

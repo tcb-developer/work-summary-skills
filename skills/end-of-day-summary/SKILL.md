@@ -40,9 +40,16 @@ Call the resolved folder `<WS>`.
 
 ## Step 3 - Read and select
 
-Collect every `### ` task section. Use its `> **Human Summary:**` block as the
-main source (it is already plain English) and the Technical Details only to
-understand what to say.
+Pull only what you need instead of reading the whole file:
+
+```bash
+grep -n -E '^### |^\*\*Status:\*\*|^> (Task|Task summary):' <WS>/WORK_SUMMARY-DD-MM-YYYY.md
+```
+
+This gives every task heading, its status and its Human Summary, which is
+already plain English and is the main source. Open a section's Technical
+Details (Read with `offset`/`limit`) only when its Human Summary is unclear
+or you need a project term it leaves out.
 
 Include only that day's work:
 
